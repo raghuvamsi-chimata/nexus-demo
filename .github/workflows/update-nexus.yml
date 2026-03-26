@@ -1,0 +1,91 @@
+name: Update Nexus Proxy Credentials
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_name:
+        description: "Repository Name"
+        required: true
+      repo_format:
+        description: "Repository Format (maven2/npm/docker)"
+        required: true
+        default: "maven2"
+      remote_url:
+        description: "Remote URL (optional)"
+        required: false
+      cred_username:
+        description: "Proxy Credential Username"
+        required: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # Mask secrets to prevent log exposure
+      - name: Mask secrets
+        run: |
+          echo "::add-mask::$NEXUS_PASS"
+          echo "::add-mask::$CRED_PASSWORD"
+        env:
+          NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+          CRED_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+
+      # Fetch existing repo config
+      - name: Fetch existing config
+        run: |
+          curl -s -w "%{http_code}" -o repo.json \
+          -u "$NEXUS_USER:$NEXUS_PASS" \
+          "$NEXUS_URL/service/rest/v1/repositories/${{ github.event.inputs.repo_format }}/proxy/${{ github.event.inputs.repo_name }}" \
+          > status.txt
+
+          STATUS=$(cat status.txt)
+
+          if [ "$STATUS" != "200" ]; then
+            echo "Fetch failed. Status: $STATUS"
+            exit 1
+          fi
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_USER: ${{ secrets.NEXUS_USER }}
+          NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
+
+      # Modify JSON safely
+      - name: Modify config
+        run: |
+          cat repo.json | jq '
+            .httpClient.authentication = {
+              type: "username",
+              username: "${{ github.event.inputs.cred_username }}",
+              password: env.CRED_PASSWORD
+            }
+            '"$( [ -n "${{ github.event.inputs.remote_url }}" ] && echo " | .proxy.remoteUrl = \"${{ github.event.inputs.remote_url }}\"" )"' \
+          > updated.json
+        env:
+          CRED_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+
+      # Update Nexus repo
+      - name: Update Nexus
+        run: |
+          curl -s -w "%{http_code}" -o response.txt \
+          -u "$NEXUS_USER:$NEXUS_PASS" \
+          -X PUT \
+          -H "Content-Type: application/json" \
+          -d @updated.json \
+          "$NEXUS_URL/service/rest/v1/repositories/${{ github.event.inputs.repo_format }}/proxy/${{ github.event.inputs.repo_name }}" \
+          > status.txt
+
+          STATUS=$(cat status.txt)
+
+          if [ "$STATUS" != "200" ] && [ "$STATUS" != "204" ]; then
+            echo "Update failed. Status: $STATUS"
+            cat response.txt
+            exit 1
+          fi
+
+          echo "Credentials updated successfully"
+        env:
+          NEXUS_URL: ${{ secrets.NEXUS_URL }}
+          NEXUS_USER: ${{ secrets.NEXUS_USER }}
+          NEXUS_PASS: ${{ secrets.NEXUS_PASS }}
